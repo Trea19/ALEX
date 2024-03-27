@@ -13,7 +13,7 @@
 #include "utils.h"
 
 // Modify these if running your own workload
-#define KEY_TYPE double
+#define KEY_TYPE unsigned int //ycsb
 #define PAYLOAD_TYPE double
 
 /*
