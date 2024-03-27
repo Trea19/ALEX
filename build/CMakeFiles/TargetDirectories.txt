@@ -1,0 +1,6 @@
+/home/ms-admin/ztong/ALEX/build/CMakeFiles/rebuild_cache.dir
+/home/ms-admin/ztong/ALEX/build/CMakeFiles/edit_cache.dir
+/home/ms-admin/ztong/ALEX/build/CMakeFiles/test.dir
+/home/ms-admin/ztong/ALEX/build/CMakeFiles/test_alex.dir
+/home/ms-admin/ztong/ALEX/build/CMakeFiles/benchmark.dir
+/home/ms-admin/ztong/ALEX/build/CMakeFiles/example.dir
