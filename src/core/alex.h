@@ -50,7 +50,7 @@ namespace alex {
 
 template <class T, class P, class Compare = AlexCompare,
           class Alloc = std::allocator<std::pair<T, P>>,
-          bool allow_duplicates = true>
+          bool allow_duplicates = false>  // [M]
 class Alex {
   static_assert(std::is_arithmetic<T>::value, "ALEX key type must be numeric.");
   static_assert(std::is_same<Compare, AlexCompare>::value,
@@ -87,7 +87,8 @@ class Alex {
     // Maximum node size, in bytes. By default, 16MB.
     // Higher values result in better average throughput, but worse tail/max
     // insert latency
-    int max_node_size = 1 << 24;
+    // int max_node_size = 1 << 24;
+    int max_node_size = 1 << 15; //32KB [M]
     // Approximate model computation: bulk load faster by using sampling to
     // train models
     bool approximate_model_computation = true;
@@ -100,8 +101,12 @@ class Alex {
   /* Setting max node size automatically changes these parameters */
   struct DerivedParams {
     // The defaults here assume the default max node size of 16MB
-    int max_fanout = 1 << 21;  // assumes 8-byte pointers
-    int max_data_node_slots = (1 << 24) / sizeof(V);
+    // int max_fanout = 1 << 21;  // assumes 8-byte pointers
+    // int max_data_node_slots = (1 << 24) / sizeof(V);
+    
+    // max_node_size motify to 32KB [M]
+    int max_fanout = 1 << 12; //assumes 8-byte -pointers
+    int max_data_node_slots = (1 << 15) / sizeof(V);
   };
   DerivedParams derived_params_;
 
@@ -125,6 +130,8 @@ class Alex {
     long long num_inserts = 0;
     double splitting_time = 0;
     double cost_computation_time = 0;
+    int num_splits = 0; // [M]
+    double num_resize = 0; // [M]
   };
   Stats stats_;
 
