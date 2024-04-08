@@ -551,8 +551,16 @@ class AlexDataNode : public AlexNode<T, P> {
 
   inline T& get_key(int pos) const { return ALEX_DATA_NODE_KEY_AT(pos); }
 
+  inline T &get_key_at_sec(int pos) const {
+    return ALEX_DATA_NODE_KEY_AT_SEC(pos);
+  }
+
   inline P& get_payload(int pos) const {
     return ALEX_DATA_NODE_PAYLOAD_AT(pos);
+  }
+
+  inline P &get_payload_at_sec(int pos) const {
+    return ALEX_DATA_NODE_PAYLOAD_AT_SEC(pos);
   }
 
   // Check whether the position corresponds to a key (as opposed to a gap)
@@ -561,6 +569,14 @@ class AlexDataNode : public AlexNode<T, P> {
     int bitmap_pos = pos >> 6;
     int bit_pos = pos - (bitmap_pos << 6);
     return static_cast<bool>(bitmap_[bitmap_pos] & (1ULL << bit_pos));
+  }
+
+  // Check whether the position corresponds to a key (as opposed to a gap) in secondary array
+  inline bool check_exists_at_sec(int pos) const {
+    assert(pos >= 0 && pos < sec_data_capacity_);
+    int bitmap_pos = pos >> 6;
+    int bit_pos = pos - (bitmap_pos << 6);
+    return static_cast<bool>(sec_bitmap_[bitmap_pos] & (1ULL << bit_pos));
   }
 
   // Mark the entry for position in the bitmap
@@ -578,6 +594,13 @@ class AlexDataNode : public AlexNode<T, P> {
     bitmap[bitmap_pos] |= (1ULL << bit_pos);
   }
 
+  inline void set_bit_at_sec(int pos) {
+    assert(pos >= 0 && pos < sec_data_capacity_);
+    int bitmap_pos = pos >> 6;
+    int bit_pos = pos - (bitmap_pos << 6);
+    sec_bitmap_[bitmap_pos] |= (1ULL << bit_pos);
+  }
+
   // Unmark the entry for position in the bitmap
   inline void unset_bit(int pos) {
     assert(pos >= 0 && pos < data_capacity_);
@@ -586,10 +609,28 @@ class AlexDataNode : public AlexNode<T, P> {
     bitmap_[bitmap_pos] &= ~(1ULL << bit_pos);
   }
 
+  inline void unset_bit_at_sec(int pos) {
+    assert(pos >= 0 && pos < sec_data_capacity_);
+    int bitmap_pos = pos >> 6;
+    int bit_pos = pos - (bitmap_pos << 6);
+    sec_bitmap_[bitmap_pos] &= ~(1ULL << bit_pos);
+  }
+
   // Value of first (i.e., min) key
   T first_key() const {
     for (int i = 0; i < data_capacity_; i++) {
-      if (check_exists(i)) return get_key(i);
+      if (check_exists(i)) {
+        T temp = get_key(i);
+        // check secondary array
+        if (is_sec_active) {
+          for (int j = 0; j < sec_data_capacity_; j++) {
+            if (check_exists_at_sec(j)) {
+              return temp < get_key_at_sec(j) ? temp : get_key_at_sec(j);
+            }
+          }
+        }
+        return temp;
+      }
     }
     return std::numeric_limits<T>::max();
   }
@@ -597,7 +638,18 @@ class AlexDataNode : public AlexNode<T, P> {
   // Value of last (i.e., max) key
   T last_key() const {
     for (int i = data_capacity_ - 1; i >= 0; i--) {
-      if (check_exists(i)) return get_key(i);
+      if (check_exists(i)) {
+        T temp = get_key(i);
+        // check secondary array
+        if (is_sec_active) {
+          for (int j = sec_data_capacity - 1; j >= 0; j--) {
+            if (check_exists_at_sec(j)){
+              return temp > get_key_at_sec(j) ? temp : get_key_at_sec(j);
+            }
+          }
+        }
+        return temp;
+      }
     }
     return std::numeric_limits<T>::lowest();
   }
@@ -642,6 +694,38 @@ class AlexDataNode : public AlexNode<T, P> {
       }
       if (right_bitmap_idx != bitmap_size_) {
         uint64_t right_bitmap_data = bitmap_[right_bitmap_idx];
+        bit_pos = right - (right_bitmap_idx << 6);
+        right_bitmap_data &= ((1ULL << bit_pos) - 1);
+        num_keys += _mm_popcnt_u64(right_bitmap_data);
+      }
+    }
+    return num_keys;
+  }
+
+    // Number of keys between positions left and right (exclusive) in
+  // the secondary key/data_slots
+  int num_keys_in_range_at_sec(int left, int right) const {
+    assert(left >= 0 && left < right && right <= sec_data_capacity_);
+    int num_keys = 0;
+    int left_bitmap_idx = left >> 6;
+    int right_bitmap_idx = right >> 6;
+    if (left_bitmap_idx == right_bitmap_idx) {
+      uint64_t bitmap_data = sec_bitmap_[left_bitmap_idx];
+      int left_bit_pos = left - (left_bitmap_idx << 6);
+      bitmap_data &= ~((1ULL << left_bit_pos) - 1);
+      int right_bit_pos = right - (right_bitmap_idx << 6);
+      bitmap_data &= ((1ULL << right_bit_pos) - 1);
+      num_keys += _mm_popcnt_u64(bitmap_data);
+    } else {
+      uint64_t left_bitmap_data = sec_bitmap_[left_bitmap_idx];
+      int bit_pos = left - (left_bitmap_idx << 6);
+      left_bitmap_data &= ~((1ULL << bit_pos) - 1);
+      num_keys += _mm_popcnt_u64(left_bitmap_data);
+      for (int i = left_bitmap_idx + 1; i < right_bitmap_idx; i++) {
+        num_keys += _mm_popcnt_u64(sec_bitmap_[i]);
+      }
+      if (right_bitmap_idx != sec_bitmap_size_) {
+        uint64_t right_bitmap_data = sec_bitmap_[right_bitmap_idx];
         bit_pos = right - (right_bitmap_idx << 6);
         right_bitmap_data &= ((1ULL << bit_pos) - 1);
         num_keys += _mm_popcnt_u64(right_bitmap_data);
