@@ -437,13 +437,25 @@ class AlexDataNode : public AlexNode<T, P> {
     }
     key_allocator().deallocate(key_slots_, data_capacity_);
     payload_allocator().deallocate(payload_slots_, data_capacity_);
+    bitmap_allocator().deallocate(bitmap_, bitmap_size_);
+
+    if (is_sec_active) {
+      key_allocator().deallocate(sec_key_slots_, sec_data_capacity_);
+      payload_allocator().deallocate(sec_payload_slots_, sec_data_capacity_);
+      bitmap_allocator().deallocate(sec_bitmap_, sec_bitmap_size_);
+    }
 #else
     if (data_slots_ == nullptr) {
       return;
     }
     value_allocator().deallocate(data_slots_, data_capacity_);
-#endif
     bitmap_allocator().deallocate(bitmap_, bitmap_size_);
+
+     if (is_sec_active) {
+      value_allocator().deallocate(sec_data_slots_, sec_data_capacity_);
+      bitmap_allocator().deallocate(sec_bitmap_, sec_bitmap_size_);
+    }
+#endif
   }
 
   AlexDataNode(const self_type& other)
@@ -454,24 +466,34 @@ class AlexDataNode : public AlexNode<T, P> {
         prev_leaf_(other.prev_leaf_),
         data_capacity_(other.data_capacity_),
         num_keys_(other.num_keys_),
+        is_sec_active(other.is_sec_active),
+        sec_data_capacity_(other.sec_data_capacity_),
+        sec_num_keys_(other.sec_num_keys_), 
         bitmap_size_(other.bitmap_size_),
+        sec_bitmap_size_(other.sec_bitmap_size_),
         expansion_threshold_(other.expansion_threshold_),
         contraction_threshold_(other.contraction_threshold_),
+        sec_expansion_threshold_(other.sec_expansion_threshold_),
+        sec_contraction_threshold_(other.sec_contraction_threshold_),
         max_slots_(other.max_slots_),
+        max_shifts_(other.max_shifts_),
         num_shifts_(other.num_shifts_),
         num_exp_search_iterations_(other.num_exp_search_iterations_),
         num_lookups_(other.num_lookups_),
         num_inserts_(other.num_inserts_),
         num_resizes_(other.num_resizes_),
+        num_merges_(other.num_merges_),
+        num_exceed_max_shifts_(other.num_exceed_max_shifts_),
         max_key_(other.max_key_),
         min_key_(other.min_key_),
-        num_right_out_of_bounds_inserts_(
-            other.num_right_out_of_bounds_inserts_),
+        num_right_out_of_bounds_inserts_(other.num_right_out_of_bounds_inserts_),
         num_left_out_of_bounds_inserts_(other.num_left_out_of_bounds_inserts_),
-        expected_avg_exp_search_iterations_(
-            other.expected_avg_exp_search_iterations_),
-        expected_avg_shifts_(other.expected_avg_shifts_) {
+        expected_avg_exp_search_iterations_(other.expected_avg_exp_search_iterations_),
+        expected_avg_shifts_(other.expected_avg_shifts_),
+        merge_time(other.merge_time), 
+        num_merge(other.num_merge) {
 #if ALEX_DATA_NODE_SEP_ARRAYS
+    // primary array
     key_slots_ = new (key_allocator().allocate(other.data_capacity_))
         T[other.data_capacity_];
     std::copy(other.key_slots_, other.key_slots_ + other.data_capacity_,
@@ -480,15 +502,37 @@ class AlexDataNode : public AlexNode<T, P> {
         P[other.data_capacity_];
     std::copy(other.payload_slots_, other.payload_slots_ + other.data_capacity_,
               payload_slots_);
+
+    // secondary array
+    sec_key_slots_ = new (key_allocator().allocate(other.sec_data_capacity_))
+        T[other.sec_data_capacity_];
+    std::copy(other.sec_key_slots_,
+              other.sec_key_slots_ + other.sec_data_capacity_, sec_key_slots_);
+    sec_payload_slots_ = new (payload_allocator().allocate(other.sec_data_capacity_))
+            P[other.sec_data_capacity_];
+    std::copy(other.sec_payload_slots_, other.sec_payload_slots_ + other.sec_data_capacity_,
+              sec_payload_slots_);
 #else
+    // primary array
     data_slots_ = new (value_allocator().allocate(other.data_capacity_))
         V[other.data_capacity_];
     std::copy(other.data_slots_, other.data_slots_ + other.data_capacity_,
               data_slots_);
+
+    // secondary array
+    sec_data_slots_ = new (value_allocator().allocate(other.sec_data_capacity_))
+        V[other.sec_data_capacity_];
+    std::copy(other.sec_data_slots_, other.sec_data_slots_ + other.sec_data_capacity_,
+              sec_data_slots_);
 #endif
     bitmap_ = new (bitmap_allocator().allocate(other.bitmap_size_))
         uint64_t[other.bitmap_size_];
     std::copy(other.bitmap_, other.bitmap_ + other.bitmap_size_, bitmap_);
+
+    sec_bitmap_ = new (bitmap_allocator().allocate(other.sec_bitmap_size_))
+        uint64_t[other.sec_bitmap_size_];
+    std::copy(other.sec_bitmap_, other.sec_bitmap_ + other.sec_bitmap_size_,
+              sec_bitmap_);
   }
 
   /*** Allocators ***/
