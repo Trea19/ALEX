@@ -779,16 +779,37 @@ class AlexDataNode : public AlexNode<T, P> {
     uint64_t cur_bitmap_data_ =
         0;  // caches the relevant data in the current bitmap position
 
+    bool is_primary = true;
+
     explicit Iterator(node_type* node) : node_(node) {}
 
-    Iterator(node_type* node, int idx) : node_(node), cur_idx_(idx) {
-      initialize();
+    Iterator(node_type *node, int idx, bool is_primary = true): node_(node), cur_idx_(idx) {
+      initialize(is_primary);
     }
 
-    void initialize() {
-      cur_bitmap_idx_ = cur_idx_ >> 6;
-      cur_bitmap_data_ = node_->bitmap_[cur_bitmap_idx_];
+    // Iterator(node_type* node, int idx) : node_(node), cur_idx_(idx) {
+    //   initialize();
+    // }
 
+    // void initialize() {
+    //   cur_bitmap_idx_ = cur_idx_ >> 6;
+    //   cur_bitmap_data_ = node_->bitmap_[cur_bitmap_idx_];
+
+    //   // Zero out extra bits
+    //   int bit_pos = cur_idx_ - (cur_bitmap_idx_ << 6);
+    //   cur_bitmap_data_ &= ~((1ULL << bit_pos) - 1);
+
+    //   (*this)++;
+    // }
+
+    void initialize(bool is_primary) {
+      this->is_primary = is_primary;
+      cur_bitmap_idx_ = cur_idx_ >> 6;
+      if (is_primary){
+        cur_bitmap_data_ = node_->bitmap_[cur_bitmap_idx_];
+      } else {
+        cur_bitmap_data_ = node_->sec_bitmap_[cur_bitmap_idx_];
+      }
       // Zero out extra bits
       int bit_pos = cur_idx_ - (cur_bitmap_idx_ << 6);
       cur_bitmap_data_ &= ~((1ULL << bit_pos) - 1);
@@ -797,13 +818,18 @@ class AlexDataNode : public AlexNode<T, P> {
     }
 
     void operator++(int) {
+      int temp_bitmap_size = is_primary ? node_->bitmap_size_ : node_->sec_bitmap_size_;
       while (cur_bitmap_data_ == 0) {
         cur_bitmap_idx_++;
-        if (cur_bitmap_idx_ >= node_->bitmap_size_) {
+        if (cur_bitmap_idx_ >= temp_bitmap_size) {
           cur_idx_ = -1;
           return;
         }
-        cur_bitmap_data_ = node_->bitmap_[cur_bitmap_idx_];
+        if (is_primary) {
+          cur_bitmap_data_ = node_->bitmap_[cur_bitmap_idx_];
+        } else {
+          cur_bitmap_data_ = node_->sec_bitmap_[cur_bitmap_idx_];
+        }
       }
       uint64_t bit = extract_rightmost_one(cur_bitmap_data_);
       cur_idx_ = get_offset(cur_bitmap_idx_, bit);
@@ -812,41 +838,71 @@ class AlexDataNode : public AlexNode<T, P> {
 
 #if ALEX_DATA_NODE_SEP_ARRAYS
     V operator*() const {
-      return std::make_pair(node_->key_slots_[cur_idx_],
-                            node_->payload_slots_[cur_idx_]);
+      if (is_primary) {
+        return std::make_pair(node_->key_slots_[cur_idx_],
+                              node_->payload_slots_[cur_idx_]);
+      } else {
+        return std::make_pair(node_->sec_key_slots_[cur_idx_],
+                              node_->sec_payload_slots_[cur_idx_]);
+      }
     }
 #else
     value_return_type& operator*() const {
-      return node_->data_slots_[cur_idx_];
+      if (is_primary) {
+        return node_->data_slots_[cur_idx_];
+      } else {
+        return node_->sec_data_slots_[cur_idx_];
+      }
     }
 #endif
 
     const T& key() const {
 #if ALEX_DATA_NODE_SEP_ARRAYS
-      return node_->key_slots_[cur_idx_];
+      if (is_primary) {
+        return node_->key_slots_[cur_idx_];
+      } else {
+        return node_->sec_key_slots_[cur_idx_];
+      }
 #else
-      return node_->data_slots_[cur_idx_].first;
+      if (is_primary) {
+        return node_->data_slots_[cur_idx_].first;
+      } else {
+        return node_->sec_data_slots_[cur_idx_].first;
+      }
+      
 #endif
     }
 
     payload_return_type& payload() const {
 #if ALEX_DATA_NODE_SEP_ARRAYS
-      return node_->payload_slots_[cur_idx_];
+      if (is_primary) {
+        return node_->payload_slots_[cur_idx_];
+      } else {
+        return node_->sec_payload_slots_[cur_idx_];
+      }
 #else
-      return node_->data_slots_[cur_idx_].second;
+      if (is_primary) {
+        return node_->data_slots_[cur_idx_].second;
+      } else {
+        return node_->sec_data_slots_[cur_idx_].second;
+      }
 #endif
     }
 
     bool is_end() const { return cur_idx_ == -1; }
 
     bool operator==(const Iterator& rhs) const {
-      return cur_idx_ == rhs.cur_idx_;
+      return cur_idx_ == rhs.cur_idx_&& is_primary == rhs.is_primary;
     }
 
     bool operator!=(const Iterator& rhs) const { return !(*this == rhs); };
   };
 
-  iterator_type begin() { return iterator_type(this, 0); }
+  iterator_type begin(bool primary = true) {
+    return iterator_type(this, 0, primary);
+  }
+
+  // iterator_type begin() { return iterator_type(this, 0); }
 
   /*** Cost model ***/
 
