@@ -19,9 +19,13 @@
 #if ALEX_DATA_NODE_SEP_ARRAYS
 #define ALEX_DATA_NODE_KEY_AT(i) key_slots_[i]
 #define ALEX_DATA_NODE_PAYLOAD_AT(i) payload_slots_[i]
+#define ALEX_DATA_NODE_KEY_AT_SEC(i) sec_key_slots_[i]
+#define ALEX_DATA_NODE_PAYLOAD_AT_SEC(i) sec_payload_slots_[i]
 #else
 #define ALEX_DATA_NODE_KEY_AT(i) data_slots_[i].first
 #define ALEX_DATA_NODE_PAYLOAD_AT(i) data_slots_[i].second
+#define ALEX_DATA_NODE_KEY_AT_SEC(i) sec_data_slots_[i].first
+#define ALEX_DATA_NODE_PAYLOAD_AT_SEC(i) sec_data_slots_[i].second
 #endif
 
 // Whether we use lzcnt and tzcnt when manipulating a bitmap (e.g., when finding
@@ -307,28 +311,51 @@ class AlexDataNode : public AlexNode<T, P> {
   template <typename node_type = self_type, typename payload_return_type = P,
             typename value_return_type = V>
   class Iterator;
+
+  template<typename node_type = self_type, typename payload_return_type = P,
+            typename value_return_type = V>
+  class TwoLevelIterator;
+
   typedef Iterator<> iterator_type;
   typedef Iterator<const self_type, const P, const V> const_iterator_type;
+  typedef TwoLevelIterator<const self_type, const P, const V> two_level_it_type;
 
   self_type* next_leaf_ = nullptr;
   self_type* prev_leaf_ = nullptr;
 
 #if ALEX_DATA_NODE_SEP_ARRAYS
   T* key_slots_ = nullptr;  // holds keys
-  P* payload_slots_ =
-      nullptr;  // holds payloads, must be same size as key_slots
+  P* payload_slots_ = nullptr;  // holds payloads, must be same size as key_slots
+
+  // for research purpose only
+  // try to allocate a secondary array if it helps
+  T *sec_key_slots_ = nullptr; // holds the keys at the secondary array
+  P *sec_payload_slots_ = nullptr; // holds the payloads in the secondary array
 #else
   V* data_slots_ = nullptr;  // holds key-payload pairs
+  V* sec_data_slots_ = nullptr;  // holds key-payload pairs
 #endif
 
   int data_capacity_ = 0;  // size of key/data_slots array
   int num_keys_ = 0;  // number of filled key/data slots (as opposed to gaps)
+
+  bool is_sec_active = false; // if allocate secondary array or not
+  int sec_data_capacity_ = 0; // size of the secondary key/data_slots array
+  int sec_num_keys_ = 0;    // number of filled key/data slots (as opposed to gaps) in the secondary array
 
   // Bitmap: each uint64_t represents 64 positions in reverse order
   // (i.e., each uint64_t is "read" from the right-most bit to the left-most
   // bit)
   uint64_t* bitmap_ = nullptr;
   int bitmap_size_ = 0;  // number of int64_t in bitmap
+
+  uint64_t *sec_bitmap_ = nullptr;
+  int sec_bitmap_size_ = 0;  // number of int64_t in bitmap
+
+  // this determines how large the secondary array we want when delaying the expansion 
+  // sec_primary_ratio_ = data capacity of the secondary array / data capacity of the primary array
+  // for example, 0.5 means the sec array is half of the primary array
+  static constexpr double sec_primary_ratio_ = 1;
 
   // Variables related to resizing (expansions and contractions)
   static constexpr double kMaxDensity_ = 0.8;  // density after contracting,
@@ -340,13 +367,19 @@ class AlexDataNode : public AlexNode<T, P> {
                                                // determines the contraction
                                                // threshold
   double expansion_threshold_ = 1;  // expand after m_num_keys is >= this number
-  double contraction_threshold_ =
-      0;  // contract after m_num_keys is < this number
+  double contraction_threshold_ = 0;  // contract after m_num_keys is < this number
+
+  double sec_expansion_threshold_ = 1;
+  double sec_contraction_threshold_ = 0;
+
   static constexpr int kDefaultMaxDataNodeBytes_ =
       1 << 24;  // by default, maximum data node size is 16MB
   int max_slots_ =
       kDefaultMaxDataNodeBytes_ /
       sizeof(V);  // cannot expand beyond this number of key/data slots
+
+  // if the shifted elements are above max_shifts_, insert the new key-value pair to secondary array
+  int max_shifts_ = 32;
 
   // Counters used in cost models
   long long num_shifts_ = 0;                 // does not reset after resizing
@@ -354,6 +387,10 @@ class AlexDataNode : public AlexNode<T, P> {
   int num_lookups_ = 0;                      // does not reset after resizing
   int num_inserts_ = 0;                      // does not reset after resizing
   int num_resizes_ = 0;  // technically not required, but nice to have
+  int num_merges_ = 0;  // does not reset after resizing
+
+  // additional counters used to accumulate stats for secondary array
+  int num_exceed_max_shifts_ = 0;
 
   // Variables for determining append-mostly behavior
   T max_key_ = std::numeric_limits<
@@ -373,6 +410,9 @@ class AlexDataNode : public AlexNode<T, P> {
   // Purely for benchmark debugging purposes
   double expected_avg_exp_search_iterations_ = 0;
   double expected_avg_shifts_ = 0;
+
+  double merge_time = 0;
+  int num_merge = 0;
 
   // Placed at the end of the key/data slots if there are gaps after the max key
   static constexpr T kEndSentinel_ = std::numeric_limits<T>::max();
@@ -1451,11 +1491,19 @@ class AlexDataNode : public AlexNode<T, P> {
     return position;
   }
 
+  inline int predict_position_at_sec(const T &key) const {
+    int position = this->model_.predict(key);
+    position = std::max<int>(std::min<int>(position, sec_data_capacity_ - 1), 0);
+    return position;
+  }
+
   // Searches for the last non-gap position equal to key
   // If no positions equal to key, returns -1
   int find_key(const T& key) {
     num_lookups_++;
     int predicted_pos = predict_position(key);
+
+    // todo:如果sec_array存在，那么还需要predict_position_sec(key)
 
     // The last key slot with a certain value is guaranteed to be a real key
     // (instead of a gap)
