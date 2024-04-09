@@ -904,6 +904,184 @@ class AlexDataNode : public AlexNode<T, P> {
 
   // iterator_type begin() { return iterator_type(this, 0); }
 
+
+  // This is the iterator used when there are two levels of gapped array
+  // This class wraps the iterators of two individual gapped array
+  template <typename node_type, typename payload_return_type,
+            typename value_return_type>
+  class TwoLevelIterator {
+  public:
+    node_type *node_;
+    int cur_idx_ = 0;        // current position in key/data_slots, -1 if at end
+    int cur_bitmap_idx_ = 0; // current position in bitmap
+    uint64_t cur_bitmap_data_ = 0; // caches the relevant data in the current bitmap position
+
+    int sec_cur_idx_ = 0; // current position in key/data_slots, -1 if at end
+    int sec_cur_bitmap_idx_ = 0; // current position in bitmap
+    uint64_t sec_cur_bitmap_data_ = 0; // caches the relevant data in the current bitmap position
+
+    explicit TwoLevelIterator(node_type *node) : node_(node) {}
+
+    TwoLevelIterator(node_type *node, int first_idx, int sec_idx)
+        : node_(node), cur_idx_(first_idx), sec_cur_idx_(sec_idx) {
+      initialize();
+    }
+
+    void initialize() {
+      cur_bitmap_idx_ = cur_idx_ >> 6;
+      sec_cur_bitmap_idx_ = sec_cur_idx_ >> 6;
+      cur_bitmap_data_ = node_->bitmap_[cur_bitmap_idx_];
+      sec_cur_bitmap_data_ = node_->sec_bitmap_[sec_cur_bitmap_idx_];
+
+      // Zero out extra bits
+      int bit_pos = cur_idx_ - (cur_bitmap_idx_ << 6);
+      cur_bitmap_data_ &= ~((1ULL << bit_pos) - 1);
+
+      int sec_bit_pos = sec_cur_idx_ - (sec_cur_bitmap_idx_ << 6);
+      sec_cur_bitmap_data_ &= ~((1ULL << sec_bit_pos) - 1);
+
+      advance_first();
+      advance_sec();
+    }
+
+    void advance_first() {
+      while (cur_bitmap_data_ == 0) {
+        cur_bitmap_idx_++;
+        if (cur_bitmap_idx_ >= node_->bitmap_size_) {
+          cur_idx_ = -1;
+          return;
+        }
+        cur_bitmap_data_ = node_->bitmap_[cur_bitmap_idx_];
+      }
+      uint64_t bit = extract_rightmost_one(cur_bitmap_data_);
+      cur_idx_ = get_offset(cur_bitmap_idx_, bit);
+      cur_bitmap_data_ = remove_rightmost_one(cur_bitmap_data_);
+    }
+
+    void advance_sec() {
+      while (sec_cur_bitmap_data_ == 0) {
+        sec_cur_bitmap_idx_++;
+        if (sec_cur_bitmap_idx_ >= node_->sec_bitmap_size_) {
+          sec_cur_idx_ = -1;
+          return;
+        }
+        sec_cur_bitmap_data_ = node_->sec_bitmap_[sec_cur_bitmap_idx_];
+      }
+      uint64_t bit = extract_rightmost_one(sec_cur_bitmap_data_);
+      sec_cur_idx_ = get_offset(sec_cur_bitmap_idx_, bit);
+      sec_cur_bitmap_data_ = remove_rightmost_one(sec_cur_bitmap_data_);
+    }
+
+    void operator++(int) {
+      if (cur_idx_ == -1 && sec_cur_idx_ == -1) {
+        return;
+      } else if (cur_idx_ == -1) {
+        advance_sec();
+        return;
+      } else if (sec_cur_idx_ == -1) {
+        advance_first();
+        return;
+      }
+      T first_key = node_->key_slots_[cur_idx_];
+      T sec_key = node_->sec_key_slots_[sec_cur_idx_];
+
+      if (first_key < sec_key) {
+        advance_first();
+      } else {
+        advance_sec();
+      }
+    }
+
+#if ALEX_DATA_NODE_SEP_ARRAYS
+    V operator*() const {
+      if (cur_idx_ == -1) {
+        return std::make_pair(node_->sec_key_slots_[sec_cur_idx_],
+                              node_->sec_payload_slots_[sec_cur_idx_]);
+      } else if (sec_cur_idx_ == -1) {
+        return std::make_pair(node_->key_slots_[cur_idx_],
+                              node_->payload_slots_[cur_idx_]);
+      } else {
+        return (node_->key_slots_[cur_idx_] <
+                        node_->sec_key_slots_[sec_cur_idx_]
+                    ? std::make_pair(node_->key_slots_[cur_idx_],
+                                     node_->payload_slots_[cur_idx_])
+                    : std::make_pair(node_->sec_key_slots_[sec_cur_idx_],
+                                     node_->sec_payload_slots_[sec_cur_idx_]));
+      }
+    }
+#else
+    value_return_type &operator*() const {
+      if (cur_idx_ == -1) {
+        return node_->sec_data_slots_[sec_cur_idx_];
+      } else if (sec_cur_idx_ == -1) {
+        return node_->data_slots_[cur_idx_];
+      } else {
+        return (node_->data_slots_[cur_idx_].first <
+                        node_->sec_data_slots_[sec_cur_idx_].first
+                    ? node_->data_slots_[cur_idx_]
+                    : node_->sec_data_slots_[sec_cur_idx_]);
+      }
+    }
+#endif
+
+    const T &key() const {
+#if ALEX_DATA_NODE_SEP_ARRAYS
+      if (cur_idx_ == -1) {
+        return node_->sec_key_slots_[sec_cur_idx_];
+      } else if (sec_cur_idx_ == -1) {
+        return node_->key_slots_[cur_idx_];
+      } else {
+        return (node_->key_slots_[cur_idx_] <
+                        node_->sec_key_slots_[sec_cur_idx_]
+                    ? node_->key_slots_[cur_idx_]
+                    : node_->sec_key_slots_[sec_cur_idx_]);
+      }
+#else
+      if (cur_idx_ == -1) {
+        return node_->sec_data_slots_[sec_cur_idx_].first;
+      } else if (sec_cur_idx_ == -1) {
+        return node_->data_slots_[cur_idx_].first;
+      } else {
+        return (node_->data_slots_[cur_idx_].first <
+                        node_->sec_data_slots_[sec_cur_idx_].first
+                    ? node_->data_slots_[cur_idx_].first
+                    : node_->sec_data_slots_[sec_cur_idx_].first);
+      }
+#endif
+    }
+
+    payload_return_type &payload() const {
+#if ALEX_DATA_NODE_SEP_ARRAYS
+      if (cur_idx_ == -1) {
+        return node_->sec_payload_slots_[sec_cur_idx_];
+      } else if (sec_cur_idx_ == -1) {
+        return node_->payload_slots_[cur_idx_];
+      } else {
+        return (node_->key_slots_[cur_idx_] <
+                        node_->sec_key_slots_[sec_cur_idx_]
+                    ? node_->payload_slots_[cur_idx_]
+                    : node_->sec_payload_slots_[sec_cur_idx_]);
+      }
+#else
+      if (cur_idx_ == -1) {
+        return node_->sec_data_slots_[sec_cur_idx_].second;
+      } else if (sec_cur_idx_ == -1) {
+        return node_->data_slots_[cur_idx_].second;
+      } else {
+        return (node_->data_slots_[cur_idx_].second <
+                        node_->sec_data_slots_[sec_cur_idx_].second
+                    ? node_->data_slots_[cur_idx_].second
+                    : node_->sec_data_slots_[sec_cur_idx_].second);
+      }
+#endif
+    }
+
+    bool is_end() const { return cur_idx_ == -1 && sec_cur_idx_ == -1; }
+  };
+
+  two_level_it_type begin_with_sec() { return two_level_it_type(this, 0, 0); }
+
+
   /*** Cost model ***/
 
   // Empirical average number of shifts per insert
