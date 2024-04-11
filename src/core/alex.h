@@ -910,9 +910,9 @@ class Alex {
   // right-most key
   // If you instead want an iterator to the left-most key with the input value,
   // use lower_bound()
-  typename self_type::Iterator find(const T& key) {
+  typename self_type::Iterator find(const T &key) {
     stats_.num_lookups++;
-    data_node_type* leaf = get_leaf(key);
+    data_node_type *leaf = get_leaf(key);
     int idx = leaf->find_key(key);
     if (idx < 0) {
       return end();
@@ -921,9 +921,9 @@ class Alex {
     }
   }
 
-  typename self_type::ConstIterator find(const T& key) const {
+  typename self_type::ConstIterator find(const T &key) const {
     stats_.num_lookups++;
-    data_node_type* leaf = get_leaf(key);
+    data_node_type *leaf = get_leaf(key);
     int idx = leaf->find_key(key);
     if (idx < 0) {
       return cend();

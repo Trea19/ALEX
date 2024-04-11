@@ -1127,6 +1127,7 @@ class AlexDataNode : public AlexNode<T, P> {
     num_lookups_ = 0;
     num_inserts_ = 0;
     num_resizes_ = 0;
+    num_merges_ = 0;
   }
 
   // Computes the expected cost of the current node
@@ -1607,7 +1608,7 @@ class AlexDataNode : public AlexNode<T, P> {
 
       for (int j = last_position + 1; j < position; j++) {
         ALEX_DATA_NODE_KEY_AT(j) = values[i].first;
-      }
+      } // fill the blank with values[i]
 
 #if ALEX_DATA_NODE_SEP_ARRAYS
       key_slots_[position] = values[i].first;
@@ -1860,12 +1861,13 @@ class AlexDataNode : public AlexNode<T, P> {
   }
 
   // Searches for the last non-gap position equal to key
-  // If no positions equal to key, returns -1
-  int find_key(const T& key) {
+  // If no positions equal to key, returns -1,-1
+  // if in primary array, returns 1, pos
+  // else if in secondary array, returns 2, pos
+  // bug?
+  int find_key(const T &key) {
     num_lookups_++;
     int predicted_pos = predict_position(key);
-
-    // todo:如果sec_array存在，那么还需要predict_position_sec(key)
 
     // The last key slot with a certain value is guaranteed to be a real key
     // (instead of a gap)
@@ -1875,6 +1877,58 @@ class AlexDataNode : public AlexNode<T, P> {
     } else {
       return pos;
     }
+  }
+
+  // Return the exact payload instead of the position of that record
+  // if no valid record is found, the returned key is set to -1
+  // it will search through both arrays if needed
+  std::pair<int, P> get_record(const T &key) {
+    num_lookups_++;
+    int predicted_pos = predict_position(key);
+    int pos = exponential_search_upper_bound(predicted_pos, key) - 1;
+    if (pos < 0 || !key_equal(ALEX_DATA_NODE_KEY_AT(pos), key)) {
+      // search through the secondary array
+      if (is_sec_active) {
+        pos = exponential_search_upper_bound_at_sec(
+                  predict_position_at_sec(key), key) -
+              1;
+        if (pos < 0 || !key_equal(ALEX_DATA_NODE_KEY_AT_SEC(pos), key)) {
+          return {-1, NULL};
+        } else {
+          return {1, ALEX_DATA_NODE_PAYLOAD_AT_SEC(pos)};
+        }
+      }
+      return {-1, NULL};
+    } else {
+      return {1, ALEX_DATA_NODE_PAYLOAD_AT(pos)};
+    }
+  }
+
+  // Return the exact payload instead of the position of that record
+  // if no valid record is found, the returned key is set to -1
+  // it will search through both arrays if needed
+  // we search for the secondary array at first
+  std::pair<int, P> get_record_rev(const T &key) {
+    num_lookups_++;
+    if (is_sec_active && sec_num_keys_ > 0) {
+      int pos = exponential_search_upper_bound_at_sec(
+                    predict_position_at_sec(key), key) -
+                1;
+      if (pos < 0 || !key_equal(ALEX_DATA_NODE_KEY_AT_SEC(pos), key)) {
+        // search for the primary array
+        int predicted_pos = predict_position(key);
+        pos = exponential_search_upper_bound(predicted_pos, key) - 1;
+        if (pos < 0 || !key_equal(ALEX_DATA_NODE_KEY_AT(pos), key)) {
+          return {-1, NULL};
+        } else {
+          return {1, ALEX_DATA_NODE_PAYLOAD_AT(pos)};
+        }
+      } else {
+        return {1, ALEX_DATA_NODE_PAYLOAD_AT_SEC(pos)};
+      }
+    }
+
+    
   }
 
   // Searches for the first non-gap position no less than key
@@ -1888,6 +1942,14 @@ class AlexDataNode : public AlexNode<T, P> {
     return get_next_filled_position(pos, false);
   }
 
+  int find_lower_at_sec(const T &key) {
+    num_lookups_++;
+    int predicted_pos = predict_position_at_sec(key);
+
+    int pos = exponential_search_lower_bound_at_sec(predicted_pos, key);
+    return get_next_filled_position_at_sec(pos, false);
+  }
+
   // Searches for the first non-gap position greater than key
   // Returns position in range [0, data_capacity]
   // Compare with upper_bound()
@@ -1897,6 +1959,14 @@ class AlexDataNode : public AlexNode<T, P> {
 
     int pos = exponential_search_upper_bound(predicted_pos, key);
     return get_next_filled_position(pos, false);
+  }
+
+  int find_upper_at_sec(const T& key) {
+    num_lookups_++;
+    int predicted_pos = predict_position_at_sec(key);
+
+    int pos = exponential_search_upper_bound_at_sec(predicted_pos, key);
+    return get_next_filled_position_at_sec(pos, false);
   }
 
   // Finds position to insert a key.
@@ -1920,6 +1990,23 @@ class AlexDataNode : public AlexNode<T, P> {
     }
   }
 
+  std::pair<int, int> find_insert_position_at_sec(const T &key) {
+    int predicted_pos =
+        predict_position_at_sec(key); // first use model to get prediction
+
+    // insert to the right of duplicate keys
+    int pos = exponential_search_upper_bound_at_sec(predicted_pos, key);
+    if (predicted_pos <= pos || check_exists_at_sec(pos)) {
+      return {pos, pos};
+    } else {
+      // Place inserted key as close as possible to the predicted position while
+      // maintaining correctness
+      return {std::min(predicted_pos,
+                       get_next_filled_position_at_sec(pos, true) - 1),
+              pos};
+    }
+  }
+
   // Starting from a position, return the first position that is not a gap
   // If no more filled positions, will return data_capacity
   // If exclusive is true, output is at least (pos + 1)
@@ -1935,7 +2022,7 @@ class AlexDataNode : public AlexNode<T, P> {
     int curBitmapIdx = pos >> 6;
     uint64_t curBitmapData = bitmap_[curBitmapIdx];
 
-    // Zero out extra bits
+    // Zero out extra bits                                                                        
     int bit_pos = pos - (curBitmapIdx << 6);
     curBitmapData &= ~((1ULL << (bit_pos)) - 1);
 
@@ -1950,6 +2037,32 @@ class AlexDataNode : public AlexNode<T, P> {
     return get_offset(curBitmapIdx, bit);
   }
 
+  int get_next_filled_position_at_sec(int pos, bool exclusive) const {
+    if (exclusive) {
+      pos++;
+      if (pos == sec_data_capacity_) {
+        return sec_data_capacity_;
+      }
+    }
+
+    int curBitmapIdx = pos >> 6;
+    uint64_t curBitmapData = sec_bitmap_[curBitmapIdx];
+
+    // Zero out extra bits
+    int bit_pos = pos - (curBitmapIdx << 6);
+    curBitmapData &= ~((1ULL << (bit_pos)) - 1);
+
+    while (curBitmapData == 0) {
+      curBitmapIdx++;
+      if (curBitmapIdx >= sec_bitmap_size_) {
+        return sec_data_capacity_;
+      }
+      curBitmapData = sec_bitmap_[curBitmapIdx];
+    }
+    uint64_t bit = extract_rightmost_one(curBitmapData);
+    return get_offset(curBitmapIdx, bit);
+  }
+
   // Searches for the first position greater than key
   // This could be the position for a gap (i.e., its bit in the bitmap is 0)
   // Returns position in range [0, data_capacity]
@@ -1959,6 +2072,12 @@ class AlexDataNode : public AlexNode<T, P> {
     num_lookups_++;
     int position = predict_position(key);
     return exponential_search_upper_bound(position, key);
+  }
+
+  template <class K> int upper_bound_at_sec(const K &key) {
+    num_lookups_++;
+    int position = predict_position_at_sec(key);
+    return exponential_search_upper_bound_at_sec(position, key);
   }
 
   // Searches for the first position greater than key, starting from position m
@@ -1991,6 +2110,33 @@ class AlexDataNode : public AlexNode<T, P> {
     return binary_search_upper_bound(l, r, key);
   }
 
+  template <class K> inline int exponential_search_upper_bound_at_sec(int m, const K &key) {
+    // Continue doubling the bound until it contains the upper bound. Then use
+    // binary search.
+    int bound = 1;
+    int l, r; // will do binary search in range [l, r)
+    if (key_greater(ALEX_DATA_NODE_KEY_AT_SEC(m), key)) {
+      int size = m;
+      while (bound < size &&
+             key_greater(ALEX_DATA_NODE_KEY_AT_SEC(m - bound), key)) {
+        bound *= 2;
+        num_exp_search_iterations_++;
+      }
+      l = m - std::min<int>(bound, size);
+      r = m - bound / 2;
+    } else {
+      int size = sec_data_capacity_ - m;
+      while (bound < size &&
+             key_lessequal(ALEX_DATA_NODE_KEY_AT_SEC(m + bound), key)) {
+        bound *= 2;
+        num_exp_search_iterations_++;
+      }
+      l = m + bound / 2;
+      r = m + std::min<int>(bound, size);
+    }
+    return binary_search_upper_bound_at_sec(l, r, key);
+  }
+
   // Searches for the first position greater than key in range [l, r)
   // https://stackoverflow.com/questions/6443569/implementation-of-c-lower-bound
   // Returns position in range [l, r]
@@ -1999,6 +2145,19 @@ class AlexDataNode : public AlexNode<T, P> {
     while (l < r) {
       int mid = l + (r - l) / 2;
       if (key_lessequal(ALEX_DATA_NODE_KEY_AT(mid), key)) {
+        l = mid + 1;
+      } else {
+        r = mid;
+      }
+    }
+    return l;
+  }
+
+  template <class K>
+  inline int binary_search_upper_bound_at_sec(int l, int r, const K &key) const {
+    while (l < r) {
+      int mid = l + (r - l) / 2;
+      if (key_lessequal(ALEX_DATA_NODE_KEY_AT_SEC(mid), key)) {
         l = mid + 1;
       } else {
         r = mid;
@@ -2016,6 +2175,12 @@ class AlexDataNode : public AlexNode<T, P> {
     num_lookups_++;
     int position = predict_position(key);
     return exponential_search_lower_bound(position, key);
+  }
+
+  template <class K> int lower_bound_at_sec(const K &key) {
+    num_lookups_++;
+    int position = predict_position_at_sec(key);
+    return exponential_search_lower_bound_at_sec(position, key);
   }
 
   // Searches for the first position no less than key, starting from position m
@@ -2047,6 +2212,34 @@ class AlexDataNode : public AlexNode<T, P> {
     return binary_search_lower_bound(l, r, key);
   }
 
+  template <class K>
+  inline int exponential_search_lower_bound_at_sec(int m, const K &key) {
+    // Continue doubling the bound until it contains the lower bound. Then use
+    // binary search.
+    int bound = 1;
+    int l, r; // will do binary search in range [l, r)
+    if (key_greaterequal(ALEX_DATA_NODE_KEY_AT_SEC(m), key)) {
+      int size = m;
+      while (bound < size &&
+             key_greaterequal(ALEX_DATA_NODE_KEY_AT_SEC(m - bound), key)) {
+        bound *= 2;
+        num_exp_search_iterations_++;
+      }
+      l = m - std::min<int>(bound, size);
+      r = m - bound / 2;
+    } else {
+      int size = sec_data_capacity_ - m;
+      while (bound < size &&
+             key_less(ALEX_DATA_NODE_KEY_AT_SEC(m + bound), key)) {
+        bound *= 2;
+        num_exp_search_iterations_++;
+      }
+      l = m + bound / 2;
+      r = m + std::min<int>(bound, size);
+    }
+    return binary_search_lower_bound_at_sec(l, r, key);
+  }
+
   // Searches for the first position no less than key in range [l, r)
   // https://stackoverflow.com/questions/6443569/implementation-of-c-lower-bound
   // Returns position in range [l, r]
@@ -2055,6 +2248,20 @@ class AlexDataNode : public AlexNode<T, P> {
     while (l < r) {
       int mid = l + (r - l) / 2;
       if (key_greaterequal(ALEX_DATA_NODE_KEY_AT(mid), key)) {
+        r = mid;
+      } else {
+        l = mid + 1;
+      }
+    }
+    return l;
+  }
+
+  template <class K>
+  inline int binary_search_lower_bound_at_sec(int l, int r,
+                                              const K &key) const {
+    while (l < r) {
+      int mid = l + (r - l) / 2;
+      if (key_greaterequal(ALEX_DATA_NODE_KEY_AT_SEC(mid), key)) {
         r = mid;
       } else {
         l = mid + 1;
